@@ -1,0 +1,2 @@
+28c5c5bad621f261979ea800da7ba113d7d817ee2bac2d4ee9964a8c94601d61  touchdesk-0.9.3-hc08-clock-fullsize.bin
+d06effdde745850329d34928ff9d295bd87657d836a83e6cefbf9156c35e1485  touchdesk-weather-rain-resources.bin

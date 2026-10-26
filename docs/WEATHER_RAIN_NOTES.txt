@@ -1,0 +1,18 @@
+降雨图标细分更新
+
+固件：touchdesk-0.9.3-hc08-weather-rain.bin，应用区0x20000。
+资源：touchdesk-weather-rain-resources.bin，资源区0x820000。这两个文件必须配套使用，不能只更新其中一个。
+
+已接入：细雨、小雨、中雨、大雨、日间阵雨、夜间阵雨、冻雨、雷雨。主页、当前天气和小时/每日预报共用映射。其余晴、多云、阴、雾、雪、未知图标像素保持一致。
+
+映射参考：https://open-meteo.com/en/docs 的WMO代码表。51/53/55细雨；61小雨；63中雨；65大雨；56/57/66/67冻雨；80/81/82阵雨，按昼夜切换太阳/月亮；95/96/97/99雷雨。阵雨强度仍由原始代码保留，当前图标按阵雨类别显示。
+
+资源从2266102增至2765020字节，增加498918字节（约487KiB），其中包含新增4个图标种类及阵字。仍通过Flash映射读取，无整包RAM复制。运行内存和启动情况见WEATHER_RAIN_BOOT.log。
+
+验证：weather_rain_ui.py实际LVGL绘制大尺寸及56px小图标、浅/深色背景，核对降雨和昼夜映射、中文阵字与堆完整性；resource_store.py核对44块资源SHA256、对齐、整包CRC及加载失败处理，均通过。上板写入/校验见WEATHER_RAIN_FLASH_RECORD.json。
+
+图像使用内置imagegen生成。选定资源位于TouchDeskWireless/assets/weather-soft3d/rain-atlas-v2.png；生成提示见WEATHER_RAIN_IMAGE_PROMPT.txt。旧atlas.png保留。实际渲染图：WEATHER_RAIN_LARGE.png、WEATHER_RAIN_SMALL_DARK.png。生成器tools/weather_art_assets.py直接更新资源位图和manifest；tools/add_weather_glyphs.py补充小字库中的阵字。
+
+回退时需同时恢复work/weather-rain-previous-app.bin和work/weather-rain-previous-resources.bin；写入前已使用设备Flash摘要核对两份备份。
+
+最终实机确认：应用和资源完整Flash摘要匹配，系统区一致；44块资源成功映射；天气页打开正常，Wi-Fi和SNTP正常，HTTP200且天气valid=1。内部空闲111687字节，最大连续31744字节，heap_ok=1；未自动操作持续发送开关。

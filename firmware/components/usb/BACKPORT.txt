@@ -1,0 +1,13 @@
+Project-local USB component override for ESP-IDF 5.4.1.
+Baseline: C:/play/esp32s3touchscreen/toolchains/idf-5.4.1-cn/components/usb
+Only ext_hub.c and private_include/ext_hub.h are replaced, byte-for-byte,
+with the official sources at commit 858947e461a0f81411e65115147342ffeef05dd8.
+https://github.com/espressif/esp-idf/commit/858947e461a0f81411e65115147342ffeef05dd8
+Merged by d7222cc89ea1062fffb9d9fb6d64e241a7d85d4d, closing issue #15437.
+https://github.com/espressif/esp-idf/issues/15437
+
+The shared IDF installation is unchanged. Kconfig, hub.c and ext_port.c
+remain at the 5.4.1 baseline; experimental LS support remains explicitly on.
+The original assertions remain enabled. No pending-list assertion is removed.
+This override is scoped to the dedicated diagnostic build. Audio/device-role
+regressions are required before adopting it in the complete application.

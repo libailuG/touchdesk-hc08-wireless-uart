@@ -1,0 +1,85 @@
+# TouchDesk HC-08 无线串口
+
+ESP32-S3 触屏固件与配套 Python / PyQt6 上位机，当前版本为 0.9.3-hc08。
+
+## 功能
+
+- HC-08 BLE 串口透传；电脑端使用 115200、8N1、无流控。
+- 48 字节小端帧 `<III8fI`：帧头 `0xAAAAAAAA`、2 个 uint32、8 个 float32、帧尾 `0xEEEEEEEE`。
+- 触屏四个状态按钮横排，主状态显示设置值，小圆点显示最新接收状态；data3 / data4 使用大数值框。
+- 四行数字键盘、独立确定按钮；显示最多四位小数，去除末尾多余零。
+- 触屏持续发送间隔 20ms；切换接收/曲线页继续，退出应用停止。
+- 上位机曲线发送最小周期 1ms，初始 100ms；不因调度延迟或发送积压自动停止，延误帧分批补发。
+- 主页自动联网更新天气，支持细分雨量及昼夜阵雨图标。
+- 主页和天气页时钟使用等宽数字，显示秒时保持原来的大字体，数字变化时位置固定。
+
+## 目录
+
+| 目录 | 内容 |
+| --- | --- |
+| `firmware/` | 固件源码、组件、资源、配置、工具与测试 |
+| `pc-host/` | 电脑上位机源码与测试 |
+| `images/` | 当前应用镜像、天气资源镜像及 SHA-256 |
+| `docs/` | 修改说明与界面示例 |
+
+设备 Flash/NVS 备份、联网凭据、编译缓存和运行日志没有包含在仓库中。
+第三方组件与字体保留各自目录中的许可证，详见 [第三方说明](THIRD_PARTY_NOTICES.md)。
+
+## 运行上位机
+
+需要 Python 3：
+
+```powershell
+python -m pip install -r pc-host/requirements.txt
+python pc-host/serial_host.py
+```
+
+默认不连接、不持续发送。选择实际连接 HC-08 的串口，再点击连接。
+`pc-host/start.ps1` 保留了原开发电脑的 conda 路径；其他电脑可使用上面的命令启动。
+
+1ms 是允许设置的目标周期，不保证无线接收端达到 1000 帧/秒。
+115200、8N1 传输 48 字节的串口理论上限约 240 帧/秒，BLE 实际还可能更低。
+协议无序号、CRC 或应用层确认，TX 计数不代表对端已收到；发送过快可能增加延迟或丢帧。
+
+## 编译固件
+
+本版本使用 ESP-IDF 5.4.1，目标为 ESP32-S3。加载自己的 ESP-IDF 环境后执行：
+
+```powershell
+cd firmware
+idf.py -B build-wireless build
+```
+
+工程保留了已验证的 `sdkconfig`、分区表、本地组件和依赖锁定文件。
+`tools/activate-idf541.ps1` 的默认路径来自原开发电脑，其他电脑需传入自己的工具目录。
+构建会通过 `tools/pack_resources.py` 生成资源包；普通编译无需重新生成原始字体或图片。
+如需重新生成位图，还需 Pillow。
+
+## 更新已有 TouchDesk 设备
+
+| 镜像 | 写入地址 |
+| --- | --- |
+| `images/touchdesk-0.9.3-hc08-clock-fullsize.bin` | `0x20000` |
+| `images/touchdesk-weather-rain-resources.bin` | `0x820000` |
+
+这两个文件不是整机合并镜像。以下命令用于具有相同分区表的设备，端口号需替换为实际端口：
+
+```powershell
+python -m esptool --chip esp32s3 --port COM9 --baud 230400 write_flash --compress 0x20000 images/touchdesk-0.9.3-hc08-clock-fullsize.bin 0x820000 images/touchdesk-weather-rain-resources.bin
+```
+
+已安装相同天气资源包时，只需更新应用地址 `0x20000`。
+空白开发板还需先安装构建生成的匹配引导程序和分区表。
+镜像校验值见 [SHA256SUMS.txt](images/SHA256SUMS.txt)。
+
+## 蓝牙配置
+
+当前固件连接已验证的 HC-08，名称为 `hc08-libai`；目标地址配置见 `firmware/main/services/serial_ble.c`。
+更换模块时需调整目标地址并重新编译。电脑串口号由操作系统分配。
+
+## 验证情况
+
+当前固件已在 ESP32-S3 实机写入，通过完整应用摘要校验及启动检查。
+时钟模拟测试覆盖三个主题、全天所有时间值、固定宽度和原字号位图一致性。
+上位机模拟测试覆盖延迟及积压后持续发送、1ms 生成、按钮发送和手动停止。
+部分早期测试依赖原开发机的工具路径或旧布局，尚未全部改为跨平台测试。

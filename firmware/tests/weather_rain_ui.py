@@ -9,7 +9,7 @@ sim.mocks+='\nconst char *weather_description(int c)'+(root/'main/apps/weather/w
 sim.resource=r'''
 const uint8_t *resource_store_data(size_t offset,size_t len){
  static uint8_t *data;
- if(!data){FILE*f=fopen("@ROOT@/build-wireless/resources.bin","rb");assert(f);data=malloc(RESOURCE_BUNDLE_SIZE);assert(data);assert(fread(data,1,RESOURCE_BUNDLE_SIZE,f)==RESOURCE_BUNDLE_SIZE);fclose(f);}
+ if(!data){FILE*f=fopen("@ROOT@/build-touch-hid/resources.bin","rb");assert(f);data=malloc(RESOURCE_BUNDLE_SIZE);assert(data);assert(fread(data,1,RESOURCE_BUNDLE_SIZE,f)==RESOURCE_BUNDLE_SIZE);fclose(f);}
  assert(offset>=64&&offset+len<=RESOURCE_BUNDLE_SIZE);return data+offset;
 }
 '''
@@ -45,7 +45,7 @@ def run(cmd,**kwargs):
   for arg in cmd:
    if arg.startswith('-I'):
     header=Path(arg[2:])/'resource_manifest.h'
-    if header.exists():header.write_bytes((root/'build-wireless/generated/resource_manifest.h').read_bytes());break
+    if header.exists():header.write_bytes((root/'build-touch-hid/generated/resource_manifest.h').read_bytes());break
   cmd=[cmd[0],'-DLV_FONT_MONTSERRAT_32=1','-DLV_FONT_MONTSERRAT_40=1','-DLV_FONT_MONTSERRAT_48=1',*cmd[1:]]
  return original_run(cmd,**kwargs)
 sim.subprocess.run=run

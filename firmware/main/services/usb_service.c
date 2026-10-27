@@ -1,5 +1,6 @@
 #include "usb_service.h"
 #include "service_task.h"
+#include "ble_mouse.h"
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
@@ -19,6 +20,9 @@ static atomic_bool online, pending, running;
 static unsigned owner;
 static bool allowed;
 static bool driver_installed;
+static atomic_bool use_ble;
+static unsigned ble_generation;
+static bool ble_was_ready;
 static bool worker_started;
 static TaskHandle_t hid_task;
 static atomic_bool stop_requested;
@@ -28,7 +32,16 @@ static int mouse_x, mouse_y, mouse_wheel;
 static bool keyboard_dirty, mouse_dirty;
 static unsigned key_sequence;
 static int volume_steps;
-static bool consumer_report(uint16_t usage) { return tud_hid_report(REPORT_CONSUMER,&usage,sizeof(usage)); }
+static bool backend_ready(void) { return use_ble?ble_touch_ready():tud_hid_ready(); }
+static bool backend_key(uint8_t id,uint8_t mods,const uint8_t *keys) {
+    if(!use_ble)return tud_hid_keyboard_report(id,mods,keys);
+    uint8_t r[8]={mods};if(keys)memcpy(r+2,keys,6);return ble_touch_report(2,r);
+}
+static bool backend_mouse(uint8_t id,uint8_t b,int8_t x,int8_t y,int8_t w,int8_t pan) {
+    if(!use_ble)return tud_hid_mouse_report(id,b,x,y,w,pan);
+    int16_t r[4]={b,x,y,w};return ble_touch_report(1,r);
+}
+static bool consumer_report(uint16_t usage) { return use_ble?ble_touch_report(3,&usage):tud_hid_report(REPORT_CONSUMER,&usage,sizeof(usage)); }
 static void clear_input(void)
 {
     held_mods=held_key=mouse_buttons=0;
@@ -76,7 +89,7 @@ void tud_umount_cb(void) { connection(false); }
 void tud_suspend_cb(bool remote_wakeup_en) { connection(false); }
 void tud_resume_cb(void) { connection(true); }
 unsigned usb_service_session(void) { return atomic_load(&session); }
-bool usb_service_online(void) { return atomic_load(&running) && atomic_load(&online); }
+bool usb_service_online(void) { return atomic_load(&running) && (use_ble?ble_touch_ready():atomic_load(&online)); }
 bool usb_service_release_pending(void) { return atomic_load(&pending); }
 unsigned usb_service_set_owner(bool enable)
 {
@@ -87,6 +100,7 @@ unsigned usb_service_set_owner(bool enable)
     atomic_fetch_add(&session,1);
     atomic_store(&pending,true);
     clear_input();
+    if(use_ble)ble_touch_cancel();
     unsigned token = owner;
     xSemaphoreGive(lock);
     return token;
@@ -98,6 +112,7 @@ void usb_service_cancel(void)
     atomic_fetch_add(&session,1);
     atomic_store(&pending,true);
     clear_input();
+    if(use_ble)ble_touch_cancel();
     xSemaphoreGive(lock);
 }
 bool usb_service_click(unsigned token,unsigned gesture,uint8_t mods,uint8_t key)
@@ -186,6 +201,14 @@ typedef struct {
 static void worker_step(worker_state_t *s)
 {
         xSemaphoreTake(lock,portMAX_DELAY);
+        if(use_ble) {
+            ble_mouse_snapshot_t snap;ble_mouse_snapshot(&snap);
+            bool ready=ble_touch_ready();
+            if(ready!=ble_was_ready || snap.reconnections!=ble_generation) {
+                ble_was_ready=ready;ble_generation=snap.reconnections;
+                clear_input();ble_touch_cancel();atomic_fetch_add(&session,1);atomic_store(&pending,true);
+            }
+        }
         unsigned now = usb_service_session();
         if(s->seen != now) {
             s->seen = now;
@@ -196,18 +219,18 @@ static void worker_step(worker_state_t *s)
             s->consuming = false;
             s->release_at = xTaskGetTickCount();
         }
-        if(usb_service_online() && tud_hid_ready()) {
+        if(usb_service_online() && backend_ready()) {
             if(s->releasing) {
-                if((int32_t)(xTaskGetTickCount()-s->release_at) >= 0 && tud_hid_keyboard_report(REPORT_KEYBOARD,0,NULL)) {
+                if((int32_t)(xTaskGetTickCount()-s->release_at) >= 0 && backend_key(REPORT_KEYBOARD,0,NULL)) {
                     s->releasing = false;
                     /* A concurrent connection callback must not be acknowledged. */
                     if(!s->release_mouse && !s->release_consumer && s->seen == usb_service_session()) atomic_store(&pending,false);
                 }
             }
-            if(!s->releasing && s->release_mouse && tud_hid_ready()) {
-                if(tud_hid_mouse_report(REPORT_MOUSE,0,0,0,0,0)) {
+            if(!s->releasing && s->release_mouse && backend_ready()) {
+                if(backend_mouse(REPORT_MOUSE,0,0,0,0,0)) {
                     s->release_mouse=false;
-                    if(tud_hid_ready() && consumer_report(0)) {
+                    if(backend_ready() && consumer_report(0)) {
                         s->release_consumer=false;
                         if(s->seen==usb_service_session()) atomic_store(&pending,false);
                     }
@@ -225,14 +248,14 @@ static void worker_step(worker_state_t *s)
                     }
                 } else if(s->tapping) {
                     if((int32_t)(xTaskGetTickCount()-s->tap_release_at)>=0 &&
-                       tud_hid_mouse_report(REPORT_MOUSE,mouse_buttons,0,0,0,0)) s->tapping=false;
+                       backend_mouse(REPORT_MOUSE,mouse_buttons,0,0,0,0)) s->tapping=false;
                 } else if(keyboard_dirty) {
-                    if(tud_hid_keyboard_report(REPORT_KEYBOARD,0,NULL)) keyboard_dirty=false;
+                    if(backend_key(REPORT_KEYBOARD,0,NULL)) keyboard_dirty=false;
                 } else if(mouse_dirty) {
                     int x=mouse_x>127?127:mouse_x< -127?-127:mouse_x;
                     int y=mouse_y>127?127:mouse_y< -127?-127:mouse_y;
                     int w=mouse_wheel>127?127:mouse_wheel< -127?-127:mouse_wheel;
-                    if(tud_hid_mouse_report(REPORT_MOUSE,mouse_buttons,x,y,w,0)) {
+                    if(backend_mouse(REPORT_MOUSE,mouse_buttons,x,y,w,0)) {
                         mouse_x-=x; mouse_y-=y; mouse_wheel-=w;
                         mouse_dirty=mouse_x||mouse_y||mouse_wheel;
                     }
@@ -247,11 +270,11 @@ static void worker_step(worker_state_t *s)
                             atomic_store(&pending,true);
                         }
                     } else if(c.mouse) {
-                        if(tud_hid_mouse_report(REPORT_MOUSE,mouse_buttons|1,0,0,0,0)) {
+                        if(backend_mouse(REPORT_MOUSE,mouse_buttons|1,0,0,0,0)) {
                             xQueueReceive(queue,&c,0); s->tapping=true;
                             s->tap_release_at=xTaskGetTickCount()+pdMS_TO_TICKS(40);
                         }
-                    } else if(tud_hid_keyboard_report(REPORT_KEYBOARD,c.mods,(uint8_t[6]){c.key})) {
+                    } else if(backend_key(REPORT_KEYBOARD,c.mods,(uint8_t[6]){c.key})) {
                         xQueueReceive(queue,&c,0);
                         /* Preserve a short tap even if it was already lifted
                          * while the endpoint was busy. An actively held key
@@ -294,6 +317,13 @@ static esp_err_t install_driver(void)
 }
 esp_err_t usb_service_stop(void)
 {
+    if(use_ble) {
+        usb_service_set_owner(false);ble_touch_cancel();
+        vTaskDelay(pdMS_TO_TICKS(50));
+        atomic_store(&running,false);
+        esp_err_t e=ble_mouse_deinit();if(e!=ESP_OK)return e;
+        use_ble=false;atomic_store(&running,false);return ESP_OK;
+    }
     if(!driver_installed) return ESP_OK;
     usb_service_set_owner(false);
     /* Give the worker a bounded chance to release a pressed key before detach. */
@@ -360,4 +390,31 @@ esp_err_t usb_service_deinit(void) {
  queue=NULL;
  if(lock) { vSemaphoreDelete(lock); }
  lock=NULL;return ESP_OK;
+}
+
+bool usb_service_is_ble(void) { return use_ble; }
+esp_err_t usb_service_transport(bool ble) {
+    if(ble==use_ble && atomic_load(&running))return ESP_OK;
+    esp_err_t e=usb_service_stop();if(e!=ESP_OK)return e;
+    if(ble) {
+        e=ble_mouse_init();
+        if(e==ESP_OK){use_ble=true;ble_was_ready=false;ble_generation=0;atomic_store(&running,true);}
+        else {
+            esp_err_t cleanup=ble_mouse_deinit();
+            if(cleanup==ESP_OK)usb_service_start();
+            else {use_ble=true;atomic_store(&running,false);}
+        }
+    } else e=usb_service_start();
+    return e;
+}
+void usb_service_pair(bool forget) {
+    if(!use_ble)return;
+    usb_service_cancel();if(forget)ble_mouse_forget();else ble_mouse_pair();
+}
+const char *usb_service_connection_text(void) {
+    if(!use_ble)return usb_service_online()?"USB: connected":"USB: disconnected";
+    ble_mouse_snapshot_t s;ble_mouse_snapshot(&s);
+    if(ble_touch_ready())return "BLE: connected";
+    if(s.connected)return s.encrypted?"BLE: enabling HID":"BLE: encrypting";
+    return s.pairing?"BLE: pairing (120s)":s.advertising?"BLE: reconnecting":"BLE: disconnected";
 }

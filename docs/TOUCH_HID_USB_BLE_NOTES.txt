@@ -1,0 +1,70 @@
+TouchDesk 0.9.4-touch-hid — USB / BLE 触屏键盘鼠标（2026-10-27）
+
+基于最近的 0.9.3-hc08 完整工程升级“快捷键”应用，保留无线串口、天气、
+固定位置且原字号的秒钟、串口大数值和四行数字键盘。电脑上位机未修改。
+
+使用
+“快捷键”底部增加“连接”页：
+- USB 有线：电脑连接原生 USB OTG，D− GPIO19 / D+ GPIO20。
+  CH340 下载/日志口不能传 HID。
+- 蓝牙 BLE：使用 ESP32-S3 内置 BLE，电脑搜索 TouchDesk KeyMouse。
+  不需要 HC-08、额外 C6 或实体 USB 键鼠。
+- 开启配对：开放 120 秒；超时需再次开启。
+- 清除绑定并重新配对：删除设备端绑定，再开放配对。
+
+状态行区分 USB 连接、BLE 配对、重连、加密、HID 启用及已连接；
+连接选择有高亮，顶栏图标跟随实际传输。
+BLE 加密并订阅键盘、鼠标和 Consumer 音量报告后启用触屏输入。
+保留快捷键、一次性修饰键、临时键盘、触控板、轻触单击、左右键、拖动、滚轮、
+音量加减及静音。切页、退出、睡眠、传输切换及断线清空旧输入，重连不重放。
+
+首次升级与配对排障
+新增音量报告改变了 HID 配置。设备首次启动新 BLE 配置会迁移 BLE 绑定记录，
+不擦除整个 NVS，Wi-Fi 和其他设置保留。
+电脑保留旧绑定时，可能显示“已配对”但不断连接/断开：
+1. Windows 蓝牙设置移除旧 TouchDesk KeyMouse。
+2. 板端“快捷键 → 连接 → 清除绑定并重新配对”。
+3. 120 秒内在 Windows 添加蓝牙设备，重新选择 TouchDesk KeyMouse。
+后续正常使用不需要每次清除绑定。
+
+本次实测：旧 Windows 绑定存在时，电脑在加密前主动断开（531 / HCI 0x13），
+实时 GATT 查询返回 Unreachable。清除双方绑定并在 Windows 设置重新添加后，
+加密与绑定成功，键盘/鼠标/音量报告全部订阅，Windows GATT 查询 Success，
+用户确认触屏可输入。未为此修改固件。
+微软 GATT 缓存说明：
+https://learn.microsoft.com/en-us/uwp/api/windows.devices.bluetooth.bluetoothcachemode
+
+生命周期
+沿用 APP_CAP_HID 服务切换，进入快捷键前停止无线串口、实体键鼠桥接、音乐、
+语音及旧 USB 服务，并释放天气/Wi-Fi。USB/BLE 共用输入 worker，BLE 不启动
+USB Host。退出时停止 BLE，由原生命周期恢复桌面网络或下一个应用。
+原实体 USB 键鼠转 BLE 应用仍保留，共用更新后的 HOGP 配置。
+
+构建、烧录与回退
+ESP-IDF 5.4.1；ESP32-S3 N16R8；LVGL 8.4。
+idf.py -B build-touch-hid build
+应用镜像 images/touchdesk-0.9.4-touch-hid.bin，地址 0x20000。
+应用镜像 SHA256：ca9d47c4f5aedb73ace6a47750bf10651cbbfc1e50b792251f89b6ce4be33ccf
+资源包与旧版完全相同，地址 0x820000，普通升级无需写入。
+烧录与应用日志波特率均为 921600；其他电脑端口应重新枚举确认身份。
+烧录前备份并核对当前应用，只写应用区；烧录后执行 verify_flash 并检查启动。
+不要用全量 flash 命令覆盖 NVS、分区表和现有资源。
+旧 0.9.3 镜像保留在 images/，可仅写 0x20000 回退。
+两个 USB 口 VBUS 相通，避免冲突供电。
+
+验证
+- ESP-IDF 构建通过，应用大小 2,385,392 字节，小于 4MB 分区。
+- 实机应用与资源摘要校验通过，启动版本为 0.9.4-touch-hid。
+- 实机快捷键进入/退出、堆完整性、返回主页后 Wi-Fi 与天气 HTTP 200 恢复通过。
+- Windows BLE 配对、加密、绑定、三类报告订阅及用户触屏输入验证通过。
+- dual_transport.py：生产输入 worker，模拟 USB/BLE、释放重试、背压、旧事件拒绝。
+- ble_touch_flow.py：生产 BLE 接收函数与真实键盘/鼠标报告队列。
+- host_regression.py、service_lifecycle.py：原 USB、应用、输入、NVS 及服务生命周期。
+- touch_ui.py：真实 LVGL 布局与触摸，连接选择、配对、键鼠、300 次切页堆稳定。
+- clock_fixed_ui.py、serial_large_data_ui.py：时钟和串口近期功能回归。
+传输模拟不等于实际无线协议测试。尚未验证原生 USB HID 实机输入、BLE 长时间与
+重启/断线重连耐久，以及所有其他应用逐项硬件切换。
+部分测试的默认编译器路径沿用原开发机；可配置的脚本可通过 --cc 指定主机 C 编译器。
+
+截图：touch-connection-usb.png、touch-connection-ble.png、touch-keyboard.png、touch-mouse.png。
+仓库不包含本机 Flash/NVS 备份、联网凭据、运行日志或编译缓存。

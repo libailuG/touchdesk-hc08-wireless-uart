@@ -1,8 +1,15 @@
 # TouchDesk HC-08 无线串口
 
-ESP32-S3 触屏固件与配套 Python / PyQt6 上位机，当前版本为 0.9.3-hc08。
+ESP32-S3 触屏固件与配套 Python / PyQt6 上位机，当前固件版本为 0.9.4-touch-hid（上位机保持原版）。
 
 ## 功能
+
+- “快捷键”应用支持 USB 有线或 ESP32-S3 内置 BLE HID，连接页可选传输方式并显示连接状态。
+- 保留触屏快捷键、修饰键、临时键盘、触控板、左右键、拖动、滚轮、音量和静音。
+- 切页、退出、切换连接、睡眠和断线时释放输入，重连不重放旧事件。
+- BLE 开放配对 120 秒，支持绑定、重连和清除绑定；首次从旧 HID 升级需同时删除电脑旧配对并在板端清除绑定。
+- USB HID 使用原生 USB OTG（D− GPIO19 / D+ GPIO20），CH340 口仅下载和日志。
+- [USB / BLE 使用与验证记录](docs/TOUCH_HID_USB_BLE_NOTES.txt)。
 
 - HC-08 BLE 串口透传；电脑端使用 115200、8N1、无流控。
 - 48 字节小端帧 `<III8fI`：帧头 `0xAAAAAAAA`、2 个 uint32、8 个 float32、帧尾 `0xEEEEEEEE`。
@@ -47,7 +54,7 @@ python pc-host/serial_host.py
 
 ```powershell
 cd firmware
-idf.py -B build-wireless build
+idf.py -B build-touch-hid build
 ```
 
 工程保留了已验证的 `sdkconfig`、分区表、本地组件和依赖锁定文件。
@@ -59,25 +66,31 @@ idf.py -B build-wireless build
 
 | 镜像 | 写入地址 |
 | --- | --- |
-| `images/touchdesk-0.9.3-hc08-clock-fullsize.bin` | `0x20000` |
+| `images/touchdesk-0.9.4-touch-hid.bin` | `0x20000` |
 | `images/touchdesk-weather-rain-resources.bin` | `0x820000` |
 
 这两个文件不是整机合并镜像。以下命令用于具有相同分区表的设备，端口号需替换为实际端口：
 
 ```powershell
-python -m esptool --chip esp32s3 --port COM9 --baud 230400 write_flash --compress 0x20000 images/touchdesk-0.9.3-hc08-clock-fullsize.bin 0x820000 images/touchdesk-weather-rain-resources.bin
+python -m esptool --chip esp32s3 --port COM9 --baud 921600 write_flash --flash_mode keep --flash_freq keep --flash_size keep 0x20000 images/touchdesk-0.9.4-touch-hid.bin
 ```
 
-已安装相同天气资源包时，只需更新应用地址 `0x20000`。
+上述命令仅写应用区，适用于已安装同一资源包的设备。资源包摘要未变化；需要资源包时单独写入 `0x820000`。烧录前备份并核对当前应用，烧录后执行 `verify_flash` 校验。应用日志波特率也是 921600。
+旧 0.9.3 应用镜像仍保留，可用于回退。
 空白开发板还需先安装构建生成的匹配引导程序和分区表。
 镜像校验值见 [SHA256SUMS.txt](images/SHA256SUMS.txt)。
 
-## 蓝牙配置
+## 无线串口蓝牙配置
 
-当前固件连接已验证的 HC-08，名称为 `hc08-libai`；目标地址配置见 `firmware/main/services/serial_ble.c`。
+“无线串口”应用连接已验证的 HC-08，名称为 `hc08-libai`；目标地址配置见 `firmware/main/services/serial_ble.c`。
 更换模块时需调整目标地址并重新编译。电脑串口号由操作系统分配。
 
 ## 验证情况
+
+0.9.4 已通过应用与原资源摘要校验、实机启动、快捷键进入/退出及返回主页后天气恢复检查。
+BLE 已在 Windows 上重新配对，确认加密、绑定及键盘/鼠标/音量报告订阅成功，触屏输入可用。
+原生 USB HID 实机输入、BLE 长时间及重启重连耐久测试尚未完成。
+生产输入队列、BLE 报告队列、生命周期、真实 LVGL 触摸、固定时钟和串口大数值回归通过。
 
 当前固件已在 ESP32-S3 实机写入，通过完整应用摘要校验及启动检查。
 时钟模拟测试覆盖三个主题、全天所有时间值、固定宽度和原字号位图一致性。

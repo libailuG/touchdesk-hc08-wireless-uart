@@ -22,3 +22,8 @@ bool usb_service_mouse_click(unsigned owner,unsigned gesture);
 /* Relative PC media-volume steps. No absolute PC volume feedback is available. */
 bool usb_service_volume(unsigned owner,unsigned gesture,int steps);
 bool usb_service_mute(unsigned owner,unsigned gesture);
+
+bool usb_service_is_ble(void);
+esp_err_t usb_service_transport(bool ble);
+const char *usb_service_connection_text(void);
+void usb_service_pair(bool forget);

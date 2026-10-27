@@ -117,7 +117,7 @@ void shell_poll(void)
     static int previous=-1,previous_visible=-1;
     static bool was_connecting;
     static int64_t connecting_since;
-    int state=usb_service_online() ? 1 : 0;
+    int state=usb_service_online() ? (usb_service_is_ble()?2:1) : 0;
     wifi_status_t network; wifi_service_status(&network);
     bool connecting=network.enabled && (network.state==NET_CONNECTING ||
         network.state==NET_GETTING_IP || network.state==NET_RETRY);
@@ -128,7 +128,7 @@ void shell_poll(void)
         (connecting && ((now-connecting_since)/500000)%2==0));
     if(state!=previous || (int)visible!=previous_visible) {
         lv_label_set_text_fmt(usb,"%s%s%s",visible?LV_SYMBOL_WIFI:"",
-            visible&&state?"  ":"",state?LV_SYMBOL_USB:"");
+            visible&&state?"  ":"",state==2?LV_SYMBOL_BLUETOOTH:state?LV_SYMBOL_USB:"");
         previous=state; previous_visible=visible;
     }
     if(notice_until && esp_timer_get_time()>notice_until) {

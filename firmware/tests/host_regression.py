@@ -204,6 +204,29 @@ int nvs_flash_init(void);
 ''',
 }
 
+HEADERS['tinyusb.h'] += r'''
+
+static bool mock_ble_ready,mock_ble_accept=true;
+static unsigned mock_ble_generation,mock_ble_reports,mock_ble_cancels,mock_pairs,mock_forgets;
+static uint8_t mock_ble_key,mock_ble_mods,mock_ble_buttons;
+static uint16_t mock_ble_consumer;
+esp_err_t ble_mouse_init(void){return ESP_OK;}
+esp_err_t ble_mouse_deinit(void){mock_ble_ready=false;return ESP_OK;}
+bool ble_touch_ready(void){return mock_ble_ready;}
+void ble_mouse_snapshot(ble_mouse_snapshot_t *s){memset(s,0,sizeof(*s));s->reconnections=mock_ble_generation;}
+void ble_touch_cancel(void){mock_ble_cancels++;mock_ble_key=mock_ble_mods=mock_ble_buttons=0;mock_ble_consumer=0;}
+void ble_mouse_pair(void){mock_pairs++;}
+void ble_mouse_forget(void){mock_forgets++;}
+bool ble_touch_report(unsigned id,const void *data){
+ if(!mock_ble_ready||!mock_ble_accept)return false;
+ mock_ble_reports++;
+ if(id==2){const uint8_t*r=data;mock_ble_mods=r[0];mock_ble_key=r[2];}
+ else if(id==1)mock_ble_buttons=((const int16_t*)data)[0];
+ else mock_ble_consumer=*(const uint16_t*)data;
+ return true;
+}
+'''
+
 USB_TEST = r'''
 #include <assert.h>
 #include <stdio.h>

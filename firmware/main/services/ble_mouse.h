@@ -19,3 +19,8 @@ void ble_mouse_forget(void);
 void ble_mouse_snapshot(ble_mouse_snapshot_t *out);
 void ble_keyboard_input(const uint8_t report[8]);
 void ble_keyboard_usb_gone(void);
+
+/* Touch input shares the HOGP profile, but never starts USB Host. */
+bool ble_touch_ready(void);
+bool ble_touch_report(unsigned id,const void *data);
+void ble_touch_cancel(void);

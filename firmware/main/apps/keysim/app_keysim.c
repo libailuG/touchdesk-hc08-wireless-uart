@@ -30,7 +30,7 @@ static const shortcut_t keys[]={
 };
 #define KEY_COUNT (sizeof(keys)/sizeof(keys[0]))
 #define PAGE_COUNT (1+(KEY_COUNT-FIRST_PAGE_KEYS+KEYS_PER_PAGE-1)/KEYS_PER_PAGE)
-typedef enum { KEY, MOD, SHORTCUT, NAV, PAD, WHEEL, MOUSE_BUTTON, DRAG, RELEASE, VOLUME_DOWN, VOLUME_UP, MUTE } action_t;
+typedef enum { KEY, MOD, SHORTCUT, NAV, PAD, WHEEL, MOUSE_BUTTON, DRAG, RELEASE, VOLUME_DOWN, VOLUME_UP, MUTE, TRANSPORT, PAIR, FORGET } action_t;
 typedef struct {
     app_ctx_t *ctx;
     action_t action;
@@ -55,7 +55,7 @@ static void indicators(state_t *s)
     for(unsigned i=0;i<s->count;i++) {
         binding_t *b=&s->bindings[i];
         bool checked=(b->action==MOD && (s->mods&b->value)) || (b->action==DRAG && s->dragging) ||
-            (b->action==NAV && b->value<3 && b->value==s->view);
+            (b->action==NAV && (b->value<3 || b->value==5) && (b->value==5?3:b->value)==s->view);
         if(checked) lv_obj_add_state(b->obj,LV_STATE_CHECKED);
         else lv_obj_clear_state(b->obj,LV_STATE_CHECKED);
         if(b->action==KEY) {
@@ -142,24 +142,32 @@ static void event(lv_event_t *e)
         }
     } else if(code==LV_EVENT_CLICKED && b->armed) {
         b->armed=false;
-        if(b->action==NAV || b->action==RELEASE) {
+        if(b->action==TRANSPORT || b->action==PAIR || b->action==FORGET) {
+            cancel(ctx);
+            if(b->action==TRANSPORT) {
+                esp_err_t err=usb_service_transport(b->value!=0);
+                ctx->hid_owner=usb_service_set_owner(true);
+                if(err!=ESP_OK)shell_notice("连接切换失败，请重试");
+            } else usb_service_pair(b->action==FORGET);
+            s->seen=usb_service_session();s->rebuild=true;
+        } else if(b->action==NAV || b->action==RELEASE) {
             cancel(ctx);
             if(b->action==NAV) {
-                if(b->value<3) s->view=b->value;
+                if(b->value<3 || b->value==5) s->view=b->value==5?3:b->value;
                 else if(b->value==3) s->page=(s->page+1)%PAGE_COUNT;
                 else s->keypage=(s->keypage+1)%3;
                 s->rebuild=true;
             }
-        } else if(b->session==usb_service_session() && usb_service_online()) {
+        } else if(ctx->active && b->session==usb_service_session() && usb_service_online()) {
             if(b->action==MOD) { s->mods^=b->value; indicators(s); }
             else if(b->action==VOLUME_DOWN || b->action==VOLUME_UP || b->action==MUTE) {
                 bool ok=b->action==MUTE?usb_service_mute(ctx->hid_owner,b->session):
                     usb_service_volume(ctx->hid_owner,b->session,b->action==VOLUME_UP?1:-1);
-                if(!ok) shell_notice("USB 不可用或队列已满");
+                if(!ok) shell_notice("连接不可用或队列已满");
             }
             else if(b->action==SHORTCUT) {
                 const shortcut_t *k=&keys[b->value];
-                if(!app_hid_click(ctx,b->session,k->mods,k->key)) shell_notice("USB 不可用或队列已满");
+                if(!usb_service_click(ctx->hid_owner,b->session,k->mods,k->key)) shell_notice("连接不可用或队列已满");
             } else if(b->action==DRAG) {
                 s->dragging=!s->dragging; s->buttons=s->dragging?1:0;
                 mouse(ctx,0,0,0); indicators(s);
@@ -181,6 +189,7 @@ static lv_obj_t *button(app_ctx_t *ctx,const char *label,int x,int y,int w,int h
     lv_obj_set_width(l,w-2);
     if(ascii) lv_obj_set_style_text_font(l,&lv_font_montserrat_14,0);
     lv_obj_center(l);
+    if(action==TRANSPORT && (value!=0)==usb_service_is_ble())lv_obj_add_state(o,LV_STATE_CHECKED);
     return o;
 }
 static void keyrow(app_ctx_t *ctx,const char *const *labels,const uint8_t *codes,const uint8_t *mods,unsigned n,int y)
@@ -235,7 +244,13 @@ static void render(app_ctx_t *ctx)
     s->status=ui_label(s->body,"",4,3,195);
     lv_obj_set_style_text_font(s->status,&lv_font_montserrat_14,0);
     button(ctx,"释放全部",204,0,112,28,RELEASE,0,0,false);
-    if(s->view==0) {
+    if(s->view==3) {
+        button(ctx,"USB 有线连接",4,36,312,48,TRANSPORT,0,0,false);
+        button(ctx,"蓝牙 BLE 连接",4,92,312,48,TRANSPORT,1,0,false);
+        button(ctx,"开启配对（120 秒）",4,148,312,44,PAIR,0,0,false);
+        button(ctx,"清除绑定并重新配对",4,200,312,44,FORGET,0,0,false);
+        ui_label(s->body,usb_service_is_ble()?"电脑蓝牙搜索：\nTouchDesk KeyMouse":"连接原生 USB OTG 口\nD- GPIO19 / D+ GPIO20",8,254,304);
+    } else if(s->view==0) {
         unsigned start=s->page?FIRST_PAGE_KEYS+(s->page-1)*KEYS_PER_PAGE:0;
         unsigned limit=s->page?KEYS_PER_PAGE:FIRST_PAGE_KEYS;
         for(unsigned i=0;i<limit && start+i<KEY_COUNT;i++)
@@ -260,9 +275,9 @@ static void render(app_ctx_t *ctx)
         button(ctx,"右键",192,232,124,40,MOUSE_BUTTON,2,0,false);
         button(ctx,"拖动锁定",4,278,312,34,DRAG,0,0,false);
     }
-    const char *tabs[]={"快捷键","键盘","鼠标"};
-    for(unsigned i=0;i<3;i++) {
-        lv_obj_t *o=button(ctx,tabs[i],4+i*105,318,102,38,NAV,i,0,false);
+    const char *tabs[]={"快捷键","键盘","鼠标","连接"};
+    for(unsigned i=0;i<4;i++) {
+        lv_obj_t *o=button(ctx,tabs[i],4+i*79,318,75,38,NAV,i==3?5:i,0,false);
         if(i==s->view) lv_obj_add_state(o,LV_STATE_CHECKED);
     }
 }
@@ -275,10 +290,12 @@ static void connection(lv_timer_t *timer)
         s->seen=usb_service_session(); local_reset(s); board_input_cancel();
     }
     if(s->rebuild) { s->rebuild=false; render(ctx); }
-    lv_label_set_text(s->status,usb_service_online()?"USB: connected":"USB: disconnected");
+    lv_label_set_text(s->status,usb_service_connection_text());
     for(unsigned i=0;i<s->count;i++) {
         binding_t *b=&s->bindings[i];
-        if(b->action==NAV || b->action==RELEASE || usb_service_online()) lv_obj_clear_state(b->obj,LV_STATE_DISABLED);
+        bool enabled=(b->action==PAIR || b->action==FORGET)?usb_service_is_ble():
+            (b->action==NAV || b->action==RELEASE || b->action==TRANSPORT || usb_service_online());
+        if(enabled) lv_obj_clear_state(b->obj,LV_STATE_DISABLED);
         else lv_obj_add_state(b->obj,LV_STATE_DISABLED);
     }
 }
@@ -294,7 +311,8 @@ static esp_err_t create(app_ctx_t *ctx,lv_obj_t *root)
     if(!t) return ESP_ERR_NO_MEM;
     connection(t); return ESP_OK;
 }
+static void destroy(app_ctx_t *ctx) { cancel(ctx); }
 const app_desc_t app_keysim={
-    .id="keysim",.title="快捷键",.subtitle="USB 触屏键盘鼠标",.caps=APP_CAP_HID,
-    .state_size=sizeof(state_t),.create=create
+    .id="keysim",.title="快捷键",.subtitle="USB / BLE 触屏键盘鼠标",.caps=APP_CAP_HID,
+    .state_size=sizeof(state_t),.create=create,.destroy=destroy
 };

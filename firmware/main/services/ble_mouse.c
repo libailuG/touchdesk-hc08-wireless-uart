@@ -6,6 +6,7 @@
 #include <string.h>
 #include <stdatomic.h>
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "nvs_flash.h"
@@ -26,7 +27,10 @@ static TaskHandle_t ble_task;
 static const char *TAG="ble_mouse";
 static portMUX_TYPE mux=portMUX_INITIALIZER_UNLOCKED;
 static mouse_flow_t flow;
-static keyboard_flow_t keys;
+static keyboard_flow_t keys,media;
+static SemaphoreHandle_t touch_lock;
+static uint16_t media_handle;
+static bool media_notify;
 static ble_mouse_snapshot_t status;
 static uint16_t conn=BLE_HS_CONN_HANDLE_NONE,report_handle,boot_handle;
 static uint16_t key_handle,key_boot_handle;
@@ -52,9 +56,10 @@ static const uint8_t report_map[]={
     0x95,0x01,0x75,0x08,0x81,0x01,
     0x05,0x08,0x19,0x01,0x29,0x05,0x95,0x05,0x75,0x01,0x91,0x02,
     0x95,0x01,0x75,0x03,0x91,0x01,
-    0x05,0x07,0x19,0x00,0x29,0xdd,0x15,0x00,0x26,0xdd,0x00,0x75,0x08,0x95,0x06,0x81,0x00,0xc0
+    0x05,0x07,0x19,0x00,0x29,0xdd,0x15,0x00,0x26,0xdd,0x00,0x75,0x08,0x95,0x06,0x81,0x00,0xc0,
+    0x05,0x0c,0x09,0x01,0xa1,0x01,0x85,0x03,0x15,0x00,0x26,0xff,0x03,0x19,0x00,0x2a,0xff,0x03,0x75,0x10,0x95,0x01,0x81,0x00,0xc0
 };
-enum { VALUE_INFO,VALUE_MAP,VALUE_PROTOCOL,VALUE_CONTROL,VALUE_INPUT,VALUE_REF,VALUE_MANUFACTURER,VALUE_MODEL,VALUE_PNP,VALUE_KEYS,VALUE_KEY_REF,VALUE_LEDS,VALUE_LED_REF };
+enum { VALUE_INFO,VALUE_MAP,VALUE_PROTOCOL,VALUE_CONTROL,VALUE_INPUT,VALUE_REF,VALUE_MANUFACTURER,VALUE_MODEL,VALUE_PNP,VALUE_KEYS,VALUE_KEY_REF,VALUE_LEDS,VALUE_LED_REF,VALUE_MEDIA,VALUE_MEDIA_REF };
 static int access_value(uint16_t ch,uint16_t ah,struct ble_gatt_access_ctxt *ctxt,void *arg)
 {
     unsigned kind=(uintptr_t)arg;
@@ -66,14 +71,16 @@ static int access_value(uint16_t ch,uint16_t ah,struct ble_gatt_access_ctxt *ctx
         if(kind==VALUE_PROTOCOL){protocol=value;ESP_LOGI(TAG,"Protocol=%s",value?"REPORT":"BOOT");}
         else if(kind==VALUE_CONTROL)suspended=(value==0);
         else return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
-        portENTER_CRITICAL(&mux);mouse_flow_reset(&flow);keyboard_flow_reset(&keys);portEXIT_CRITICAL(&mux);
+        portENTER_CRITICAL(&mux);mouse_flow_reset(&flow);keyboard_flow_reset(&keys);keyboard_flow_reset(&media);portEXIT_CRITICAL(&mux);
         return 0;
     }
     const void *data=NULL;size_t len=0;
     static const uint8_t info[]={0x11,0x01,0x00,0x02},ref[]={1,1},pnp[]={1,0xff,0xff,1,0,1,0};
     uint8_t input[6]={0};
-    static const uint8_t key_ref[]={2,1},led_ref[]={2,2};
+    static const uint8_t key_ref[]={2,1},led_ref[]={2,2},media_ref[]={3,1};
     switch(kind) {
+    case VALUE_MEDIA:data=media.physical+2;len=2;break;
+    case VALUE_MEDIA_REF:data=media_ref;len=2;break;
     case VALUE_INFO:data=info;len=sizeof(info);break;
     case VALUE_MAP:data=report_map;len=sizeof(report_map);break;
     case VALUE_PROTOCOL:data=&protocol;len=1;break;
@@ -84,7 +91,7 @@ static int access_value(uint16_t ch,uint16_t ah,struct ble_gatt_access_ctxt *ctx
     case VALUE_LEDS:data=&leds;len=1;break;
     case VALUE_LED_REF:data=led_ref;len=2;break;
     case VALUE_MANUFACTURER:data="TouchDesk Prototype";len=strlen(data);break;
-    case VALUE_MODEL:data="USB to BLE KeyMouse";len=strlen(data);break;
+    case VALUE_MODEL:data="TouchDesk HID";len=strlen(data);break;
     case VALUE_PNP:data=pnp;len=sizeof(pnp);break;
     default:return BLE_ATT_ERR_READ_NOT_PERMITTED;
     }
@@ -93,6 +100,9 @@ static int access_value(uint16_t ch,uint16_t ah,struct ble_gatt_access_ctxt *ctx
 #define CHR(u,k,f) .uuid=BLE_UUID16_DECLARE(u),.access_cb=access_value,.arg=(void *)(uintptr_t)(k),.flags=(f)
 static const struct ble_gatt_svc_def services[]={
     {.type=BLE_GATT_SVC_TYPE_PRIMARY,.uuid=BLE_UUID16_DECLARE(0x1812),.characteristics=(struct ble_gatt_chr_def[]){
+        {CHR(0x2a4d,VALUE_MEDIA,BLE_GATT_CHR_F_READ|BLE_GATT_CHR_F_NOTIFY|BLE_GATT_CHR_F_READ_ENC),.val_handle=&media_handle,
+         .descriptors=(struct ble_gatt_dsc_def[]){
+            {.uuid=BLE_UUID16_DECLARE(0x2908),.att_flags=BLE_ATT_F_READ,.access_cb=access_value,.arg=(void *)VALUE_MEDIA_REF},{0}}},
         {CHR(0x2a4a,VALUE_INFO,BLE_GATT_CHR_F_READ)},
         {CHR(0x2a4b,VALUE_MAP,BLE_GATT_CHR_F_READ|BLE_GATT_CHR_F_READ_ENC)},
         {CHR(0x2a4e,VALUE_PROTOCOL,BLE_GATT_CHR_F_READ|BLE_GATT_CHR_F_WRITE_NO_RSP|BLE_GATT_CHR_F_READ_ENC|BLE_GATT_CHR_F_WRITE_ENC)},
@@ -142,8 +152,8 @@ static void advertise(void)
 }
 static void reset_link(void) {
     conn=BLE_HS_CONN_HANDLE_NONE;report_notify=boot_notify=suspended=false;protocol=1;last_buttons=0;
-    key_notify=key_boot_notify=false;memset(last_keys,0,8);
-    portENTER_CRITICAL(&mux);status.connected=status.encrypted=false;mouse_flow_ready(&flow,false);keyboard_flow_ready(&keys,false);portEXIT_CRITICAL(&mux);
+    key_notify=key_boot_notify=media_notify=false;memset(last_keys,0,8);
+    portENTER_CRITICAL(&mux);status.connected=status.encrypted=false;mouse_flow_ready(&flow,false);keyboard_flow_ready(&keys,false);keyboard_flow_ready(&media,false);memset(media.physical,0,8);portEXIT_CRITICAL(&mux);
 }
 static int gap_event(struct ble_gap_event *e,void *arg)
 {
@@ -160,7 +170,7 @@ static int gap_event(struct ble_gap_event *e,void *arg)
         key_notify=key_boot_notify=false;
         portENTER_CRITICAL(&mux);status.connected=true;status.encrypted=false;status.interval=desc.conn_itvl;status.reconnections++;mouse_flow_ready(&flow,false);portEXIT_CRITICAL(&mux);
         ESP_LOGI(TAG,"Connected; requesting encryption");
-        portENTER_CRITICAL(&mux);keyboard_flow_ready(&keys,false);portEXIT_CRITICAL(&mux);
+        portENTER_CRITICAL(&mux);keyboard_flow_ready(&keys,false);keyboard_flow_ready(&media,false);memset(media.physical,0,8);portEXIT_CRITICAL(&mux);
         int rc=ble_gap_security_initiate(conn);if(rc)ESP_LOGW(TAG,"Security initiate=%d",rc);
         struct ble_gap_upd_params upd={.itvl_min=6,.itvl_max=12,.latency=0,.supervision_timeout=400};
         rc=ble_gap_update_params(conn,&upd);if(rc)ESP_LOGW(TAG,"Connection parameter request=%d",rc);
@@ -177,6 +187,7 @@ static int gap_event(struct ble_gap_event *e,void *arg)
     case BLE_GAP_EVENT_SUBSCRIBE:
         if(e->subscribe.attr_handle==report_handle)report_notify=e->subscribe.cur_notify;
         if(e->subscribe.attr_handle==boot_handle)boot_notify=e->subscribe.cur_notify;
+        if(e->subscribe.attr_handle==media_handle)media_notify=e->subscribe.cur_notify;
         if(e->subscribe.attr_handle==key_handle)key_notify=e->subscribe.cur_notify;
         if(e->subscribe.attr_handle==key_boot_handle)key_boot_notify=e->subscribe.cur_notify;
         ESP_LOGI(TAG,"Subscribe handle=%u enabled=%u (report=%u boot=%u)",e->subscribe.attr_handle,e->subscribe.cur_notify,report_handle,boot_handle);break;
@@ -189,6 +200,9 @@ static int gap_event(struct ble_gap_event *e,void *arg)
     case BLE_GAP_EVENT_NOTIFY_TX:
         if(e->notify_tx.attr_handle==report_handle||e->notify_tx.attr_handle==boot_handle) {
             portENTER_CRITICAL(&mux);if(!e->notify_tx.status)status.completed++;else {status.failed++;mouse_flow_reset(&flow);}portEXIT_CRITICAL(&mux);
+        }
+        if(e->notify_tx.attr_handle==media_handle && e->notify_tx.status) {
+            portENTER_CRITICAL(&mux);keyboard_flow_reset(&media);portEXIT_CRITICAL(&mux);
         }
         if(e->notify_tx.attr_handle==key_handle||e->notify_tx.attr_handle==key_boot_handle) {
             portENTER_CRITICAL(&mux);if(!e->notify_tx.status)status.key_completed++;else {status.key_failed++;keyboard_flow_reset(&keys);}portEXIT_CRITICAL(&mux);
@@ -206,10 +220,11 @@ static int gap_event(struct ble_gap_event *e,void *arg)
 static void tick(struct ble_npl_event *ev)
 {
     if(atomic_load(&stopping_ble))return;
+    xSemaphoreTake(touch_lock,portMAX_DELAY);
     unsigned cmd=atomic_exchange(&commands,0);
     if(cmd&2) {
         if(conn!=BLE_HS_CONN_HANDLE_NONE) {
-            portENTER_CRITICAL(&mux);mouse_flow_ready(&flow,false);keyboard_flow_ready(&keys,false);portEXIT_CRITICAL(&mux);
+            portENTER_CRITICAL(&mux);mouse_flow_ready(&flow,false);keyboard_flow_ready(&keys,false);keyboard_flow_ready(&media,false);memset(media.physical,0,8);portEXIT_CRITICAL(&mux);
             ble_gap_terminate(conn,BLE_ERR_REM_USER_CONN_TERM);atomic_fetch_or(&commands,2);
         } else {
             if(ble_gap_adv_active())ble_gap_adv_stop();
@@ -229,6 +244,7 @@ static void tick(struct ble_npl_event *ev)
     mouse_packet_t p;bool send=mouse_flow_peek_limit(&flow,&p,protocol?32767:127);
     bool key_ready=status.connected&&status.encrypted&&!suspended&&(protocol?key_notify:key_boot_notify)&&!(cmd&2);
     keyboard_flow_ready(&keys,key_ready);status.keyboard_ready=key_ready;
+    keyboard_flow_ready(&media,key_ready&&protocol&&media_notify);
     keyboard_packet_t kp;bool send_key=keyboard_flow_peek(&keys,&kp);
     portEXIT_CRITICAL(&mux);
     if(send) {
@@ -252,6 +268,15 @@ static void tick(struct ble_npl_event *ev)
         else {status.key_failed++;if(++key_failures>=10){keyboard_flow_reset(&keys);key_failures=0;}}
         portEXIT_CRITICAL(&mux);
     }
+    portENTER_CRITICAL(&mux);
+    keyboard_packet_t cp;bool send_media=keyboard_flow_peek(&media,&cp);
+    portEXIT_CRITICAL(&mux);
+    if(send_media) {
+        struct os_mbuf *om=ble_hs_mbuf_from_flat(cp.data+2,2);
+        int rc=om?ble_gatts_notify_custom(conn,media_handle,om):BLE_HS_ENOMEM;
+        if(!rc){portENTER_CRITICAL(&mux);keyboard_flow_commit(&media,&cp);portEXIT_CRITICAL(&mux);}
+    }
+    xSemaphoreGive(touch_lock);
     if(!atomic_load(&stopping_ble))ble_npl_callout_reset(&timer,ble_npl_time_ms_to_ticks32(10));
 }
 static void sync_host(void) {
@@ -267,6 +292,8 @@ esp_err_t ble_mouse_init(void)
 {
     if(initialized)return atomic_load(&stopping_ble)?ESP_ERR_INVALID_STATE:ESP_OK;
     if(port_initialized)return ESP_ERR_INVALID_STATE;
+    if(!touch_lock)touch_lock=xSemaphoreCreateMutex();
+    if(!touch_lock)return ESP_ERR_NO_MEM;
     atomic_store(&stopping_ble,false);host_stopped=false;
     protocol=1;suspended=false;consecutive_failures=key_failures=0;memset(last_keys,0,sizeof(last_keys));last_buttons=leds=0;
     esp_err_t err=nvs_flash_init();if(err!=ESP_OK)return err; /* Never erase existing settings. */
@@ -288,10 +315,10 @@ esp_err_t ble_mouse_init(void)
     nvs_handle_t meta;
     err=nvs_open("bridge_hid",NVS_READWRITE,&meta);if(err!=ESP_OK)goto failed;
     uint32_t schema=0;nvs_get_u32(meta,"schema",&schema);
-    if(schema!=0x00080502) {
+    if(schema!=0x00080503) {
         rc=ble_store_clear();
         if(rc){nvs_close(meta);ESP_LOGE(TAG,"BLE profile reset=%d",rc);err=ESP_FAIL;goto failed;}
-        err=nvs_set_u32(meta,"schema",0x00080502);
+        err=nvs_set_u32(meta,"schema",0x00080503);
         if(err==ESP_OK)err=nvs_commit(meta);
         if(err!=ESP_OK){nvs_close(meta);goto failed;}
         ESP_LOGI(TAG,"HID schema upgraded; BLE bonds reset once. Remove old Windows pairing.");
@@ -318,7 +345,7 @@ void ble_mouse_snapshot(ble_mouse_snapshot_t *out) {
     portENTER_CRITICAL(&mux);out->key_queued=keys.count;out->key_dropped=keys.dropped;out->key_overflows=keys.overflows;out->key_rollovers=keys.rollovers;portEXIT_CRITICAL(&mux);
 }
 void ble_keyboard_input(const uint8_t report[8]){portENTER_CRITICAL(&mux);keyboard_flow_feed(&keys,report);portEXIT_CRITICAL(&mux);}
-void ble_keyboard_usb_gone(void){portENTER_CRITICAL(&mux);memset(keys.physical,0,8);keyboard_flow_reset(&keys);portEXIT_CRITICAL(&mux);}
+void ble_keyboard_usb_gone(void){portENTER_CRITICAL(&mux);memset(keys.physical,0,8);keyboard_flow_reset(&keys);keyboard_flow_reset(&media);portEXIT_CRITICAL(&mux);}
 
 esp_err_t ble_mouse_deinit(void) {
  if(!initialized) {
@@ -333,6 +360,35 @@ esp_err_t ble_mouse_deinit(void) {
  e=nimble_port_deinit();if(e!=ESP_OK)return e;port_initialized=false;
  initialized=false;synced=false;conn=BLE_HS_CONN_HANDLE_NONE;
  report_notify=boot_notify=key_notify=key_boot_notify=false;pairing_until=0;
- portENTER_CRITICAL(&mux);memset(&status,0,sizeof(status));memset(&flow,0,sizeof(flow));memset(&keys,0,sizeof(keys));portEXIT_CRITICAL(&mux);
+ portENTER_CRITICAL(&mux);memset(&status,0,sizeof(status));memset(&flow,0,sizeof(flow));memset(&keys,0,sizeof(keys));memset(&media,0,sizeof(media));media_notify=false;portEXIT_CRITICAL(&mux);
  atomic_store(&commands,0);return ESP_OK;
+}
+
+bool ble_touch_ready(void) {
+    portENTER_CRITICAL(&mux);
+    bool ready=flow.ready&&keys.ready&&media.ready;
+    portEXIT_CRITICAL(&mux);return ready;
+}
+void ble_touch_cancel(void) {
+    if(!touch_lock)return;
+    xSemaphoreTake(touch_lock,portMAX_DELAY);portENTER_CRITICAL(&mux);
+    flow.physical=0;memset(keys.physical,0,8);memset(media.physical,0,8);
+    mouse_flow_reset(&flow);keyboard_flow_reset(&keys);keyboard_flow_reset(&media);
+    portEXIT_CRITICAL(&mux);xSemaphoreGive(touch_lock);
+}
+bool ble_touch_report(unsigned id,const void *data) {
+    if(!touch_lock)return false;
+    xSemaphoreTake(touch_lock,portMAX_DELAY);portENTER_CRITICAL(&mux);
+    bool ok=false;
+    if(id==1) {
+        const int16_t *r=data;
+        ok=flow.ready&&flow.armed&&!flow.release&&flow.count<MOUSE_FLOW_CAP;
+        if(ok)mouse_flow_feed_wheel(&flow,r[0],r[1],r[2],r[3]);
+    } else {
+        keyboard_flow_t *f=id==2?&keys:&media;uint8_t r[8]={0};
+        if(id==2)memcpy(r,data,8);else memcpy(r+2,data,2);
+        ok=f->ready&&f->armed&&!f->release&&f->count<KEYBOARD_FLOW_CAP;
+        if(ok)keyboard_flow_feed(f,r);
+    }
+    portEXIT_CRITICAL(&mux);xSemaphoreGive(touch_lock);return ok;
 }

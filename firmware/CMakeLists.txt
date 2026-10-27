@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
 set(COMPONENTS main)
-set(PROJECT_VER "0.9.3-hc08")
+set(PROJECT_VER "0.9.4-touch-hid")
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(touchdesk VERSION 0.8.1)

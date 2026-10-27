@@ -38,9 +38,15 @@ bool usb_service_mouse(unsigned o,unsigned g,uint8_t b,int x,int y,int w) {
 bool usb_service_mouse_click(unsigned o,unsigned g) { if(!online||g!=session)return false;mouse_clicks++;return true; }
 bool usb_service_volume(unsigned o,unsigned g,int n){if(!online||g!=session)return false;volume_delta+=n;return true;}
 bool usb_service_mute(unsigned o,unsigned g){if(!online||g!=session)return false;mute_clicks++;return true;}
-bool app_hid_click(app_ctx_t *ctx,unsigned g,uint8_t m,uint8_t k) {
+bool usb_service_click(unsigned o,unsigned g,uint8_t m,uint8_t k) {
     if(g!=session||!online)return false;clicks++;return true;
 }
+static bool transport_ble;static unsigned pairs,forgets;
+bool usb_service_is_ble(void){return transport_ble;}
+unsigned usb_service_set_owner(bool on){session++;return 1;}
+esp_err_t usb_service_transport(bool ble){transport_ble=ble;session++;return ESP_OK;}
+const char *usb_service_connection_text(void){return transport_ble?"BLE: pairing (120s)":"USB: connected";}
+void usb_service_pair(bool forget){if(forget)forgets++;else pairs++;}
 lv_timer_t *app_timer_create(app_ctx_t *ctx,lv_timer_cb_t cb,uint32_t ms) {
     return ctx->timers[0]=lv_timer_create(cb,ms,ctx);
 }
@@ -86,7 +92,7 @@ int main(void) {
     static lv_disp_drv_t drv;lv_disp_drv_init(&drv);drv.hor_res=320;drv.ver_res=480;drv.draw_buf=&db;drv.flush_cb=flush;assert(lv_disp_drv_register(&drv));
     static lv_indev_drv_t in;lv_indev_drv_init(&in);in.type=LV_INDEV_TYPE_POINTER;in.read_cb=read_pointer;assert(lv_indev_drv_register(&in));
     lv_obj_t *screen=lv_scr_act();lv_obj_set_style_text_font(screen,&font_ui,0);lv_obj_set_style_bg_color(screen,ui_background(),0);lv_obj_set_style_text_color(screen,ui_foreground(),0);
-    ui_label(screen,"快捷键",12,8,170);ui_label(screen,"USB",266,8,50);
+    ui_label(screen,"快捷键",12,8,170);ui_label(screen,"HID",266,8,50);
     ui_button(screen,"返回",10,430,140,42,NULL,NULL);ui_button(screen,"主页",170,430,140,42,NULL,NULL);
     lv_obj_t *root=lv_obj_create(screen);lv_obj_remove_style_all(root);lv_obj_set_pos(root,0,62);lv_obj_set_size(root,320,360);lv_obj_clear_flag(root,LV_OBJ_FLAG_SCROLLABLE);
     state_t state={0};app_ctx_t ctx={.active=true,.state=&state,.hid_owner=1,.root=root};
@@ -110,7 +116,7 @@ int main(void) {
     pointer(50,310,true);assert(buttons==1);pointer(50,310,false);assert(buttons==0);
     pointer(240,310,true);assert(buttons==2);pointer(240,310,false);assert(buttons==0);
     unsigned old_clicks=mouse_clicks;pointer(80,150,true);pointer(80,150,false);assert(mouse_clicks==old_clicks+1&&buttons==0);
-    tap(100,360);assert(buttons==1);tap(155,400);assert(state.view==1&&buttons==0);
+    tap(100,360);assert(buttons==1);tap(110,400);assert(state.view==1&&buttons==0);
     select_view(&ctx,2);pointer(80,150,true);select_view(&ctx,1);pointer(30,147,true);assert(key==0);pointer(30,147,false);
     state.keypage=0;select_view(&ctx,1);pointer(16,147,true);assert(key==20);
     online=false;session++;tick(40);assert(key==20); // hardware service separately clears reports; UI must not replay
@@ -119,6 +125,12 @@ int main(void) {
     lv_mem_monitor_t before,after;select_view(&ctx,0);lv_mem_monitor(&before);
     for(unsigned i=0;i<300;i++)select_view(&ctx,i%3);
     select_view(&ctx,0);lv_mem_monitor(&after);assert(after.free_size>=before.free_size);assert(lv_mem_test()==LV_RES_OK);
+    select_view(&ctx,3);snapshot("touch-connection-usb");
+    tap(155,174);assert(transport_ble);tick(80);bounds(state.body);snapshot("touch-connection-ble");
+    tap(155,230);assert(pairs==1);tap(155,280);assert(forgets==1);
+    tap(155,120);assert(!transport_ble);
+    select_view(&ctx,0);tap(280,400);assert(state.view==3);
+    destroy(&ctx);assert(key==0&&buttons==0);
     printf("PASS real LVGL: layout/labels, shortcuts, one-shot modifier, hold/release, slide cancellation, mouse buttons/move/drag/wheel/tap, page/reconnect held-touch isolation, 300 page switches heap %u -> %u\n",before.free_size,after.free_size);
     return 0;
 }
